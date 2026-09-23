@@ -1,0 +1,12 @@
+[Unit]
+Description=Parkour street parking watcher
+After=network.target
+
+[Service]
+User=cameraftp
+WorkingDirectory=/home/cameraftp/parkour-app
+ExecStart=/home/cameraftp/parkour-app/.venv/bin/python parkour.py watch
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+{
+  "uploads_dir": "/home/cameraftp/uploads",
+  "output_dir": "/home/cameraftp/parkour",
+  "model": "yolov8n.pt",
+  "confidence": 0.3,
+  "occupied_threshold": 0.3,
+  "poll_seconds": 2,
+  "spots": [
+    {
+      "name": "curb",
+      "polygon": [[100, 600], [700, 550], [760, 700], [80, 780]]
+    }
+  ]
+}
