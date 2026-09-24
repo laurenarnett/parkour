@@ -42,6 +42,7 @@ def load_config(path):
     cfg.setdefault("hidden_threshold", 0.8)
     cfg.setdefault("poll_seconds", 2)
     cfg.setdefault("ignore", [])
+    cfg.setdefault("frame_size", [896, 512])
     if not cfg.get("spots"):
         sys.exit(f"{path}: define at least one entry in \"spots\"")
     return cfg
@@ -140,8 +141,17 @@ def annotate(img, vehicles, spots, cfg):
     return out
 
 
-def process(path, cfg, detector):
+def load_image(path, cfg):
+    """Read an image, resized to the frame size the spot polygons were drawn on."""
     img = cv2.imread(str(path))
+    w, h = cfg["frame_size"]
+    if img is not None and img.shape[:2] != (h, w):
+        img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+    return img
+
+
+def process(path, cfg, detector):
+    img = load_image(path, cfg)
     if img is None:
         log.warning("could not read %s", path)
         return None
@@ -197,7 +207,7 @@ def watch(cfg, detector, backfill):
 
 
 def grid(image_path, cfg, out_path):
-    img = cv2.imread(str(image_path))
+    img = load_image(image_path, cfg)
     if img is None:
         sys.exit(f"could not read {image_path}")
     h, w = img.shape[:2]

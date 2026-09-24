@@ -17,6 +17,7 @@ YOLOv8 finds the vehicles in each photo. A spot counts as taken when the bottom 
 
 2. Open `grid.jpg` and read off the corners of each parking spot.
 3. Put those corners in `config.json` under `spots`.
+   Coordinates are in the `frame_size` frame (896×512 by default). Photos of any other size are resized to it first, so the spots still line up if the camera's upload resolution changes.
 4. Run `grid` again to check that the yellow outlines line up with the spots.
 
 ## Run
