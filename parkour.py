@@ -35,11 +35,13 @@ def load_config(path):
     with open(path) as f:
         cfg = json.load(f)
     cfg.setdefault("uploads_dir", "/home/cameraftp/uploads")
-    cfg.setdefault("output_dir", "/home/cameraftp/parkour")
-    cfg.setdefault("model", "yolov8n.pt")
-    cfg.setdefault("confidence", 0.3)
-    cfg.setdefault("occupied_threshold", 0.3)
+    cfg.setdefault("output_dir", str(Path(__file__).with_name("output")))
+    cfg.setdefault("model", "yolov8s.pt")
+    cfg.setdefault("confidence", 0.25)
+    cfg.setdefault("occupied_threshold", 0.2)
+    cfg.setdefault("hidden_threshold", 0.8)
     cfg.setdefault("poll_seconds", 2)
+    cfg.setdefault("ignore", [])
     if not cfg.get("spots"):
         sys.exit(f"{path}: define at least one entry in \"spots\"")
     return cfg
@@ -66,36 +68,57 @@ class Detector:
 
 
 def spot_occupancy(img_shape, polygon, vehicles):
-    """Fraction of the spot polygon covered by the lower half of any vehicle box.
+    """Return (footprint, full): fractions of the spot polygon covered by vehicles.
 
-    Only the lower half of each box is used: with the camera looking down the
-    street, the top of a tall vehicle overlaps spots behind it, but the part
-    touching the ground is what actually sits in a spot.
+    footprint uses only the lower half of each box: with the camera looking
+    down the street, the top of a tall vehicle overlaps spots behind it, but
+    the part touching the ground is what actually sits in a spot. full uses
+    the whole box, which tells us when a spot is blocked from view.
     """
     h, w = img_shape[:2]
     spot = np.zeros((h, w), np.uint8)
     cv2.fillPoly(spot, [np.array(polygon, np.int32)], 1)
     spot_area = int(spot.sum())
     if spot_area == 0:
-        return 0.0
+        return 0.0, 0.0
 
-    cars = np.zeros((h, w), np.uint8)
+    lower = np.zeros((h, w), np.uint8)
+    whole = np.zeros((h, w), np.uint8)
     for x1, y1, x2, y2, *_ in vehicles:
-        cars[(y1 + y2) // 2 : y2, x1:x2] = 1
-    return float((spot & cars).sum()) / spot_area
+        lower[(y1 + y2) // 2 : y2, x1:x2] = 1
+        whole[y1:y2, x1:x2] = 1
+    return (float((spot & lower).sum()) / spot_area,
+            float((spot & whole).sum()) / spot_area)
+
+
+def outside_ignore_zones(vehicles, zones):
+    """Drop detections centered in an ignore zone (e.g. a trash bin YOLO calls a car)."""
+    kept = []
+    for v in vehicles:
+        center = ((v[0] + v[2]) / 2, (v[1] + v[3]) / 2)
+        if not any(cv2.pointPolygonTest(np.array(z, np.float32), center, False) >= 0 for z in zones):
+            kept.append(v)
+    return kept
 
 
 def analyze(img, cfg, detector):
-    vehicles = detector.vehicles(img)
+    vehicles = outside_ignore_zones(detector.vehicles(img), cfg["ignore"])
     spots = []
     for spot in cfg["spots"]:
-        overlap = spot_occupancy(img.shape, spot["polygon"], vehicles)
-        spots.append({
-            "name": spot["name"],
-            "occupied": overlap >= cfg["occupied_threshold"],
-            "overlap": round(overlap, 3),
-        })
+        footprint, full = spot_occupancy(img.shape, spot["polygon"], vehicles)
+        if footprint >= cfg["occupied_threshold"]:
+            state = "taken"
+        elif full >= cfg["hidden_threshold"]:
+            # Covered by the top of a vehicle in front (e.g. a double-parked
+            # truck), so we can't see whether anything is parked there.
+            state = "hidden"
+        else:
+            state = "free"
+        spots.append({"name": spot["name"], "status": state, "overlap": round(footprint, 3)})
     return vehicles, spots
+
+
+STATUS_COLORS = {"taken": (0, 0, 255), "free": (0, 200, 0), "hidden": (0, 165, 255)}
 
 
 def annotate(img, vehicles, spots, cfg):
@@ -106,15 +129,14 @@ def annotate(img, vehicles, spots, cfg):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 160, 0), 2)
     for spot_cfg, status in zip(cfg["spots"], spots):
         pts = np.array(spot_cfg["polygon"], np.int32)
-        color = (0, 0, 255) if status["occupied"] else (0, 200, 0)
+        color = STATUS_COLORS[status["status"]]
         overlay = out.copy()
         cv2.fillPoly(overlay, [pts], color)
         out = cv2.addWeighted(overlay, 0.3, out, 0.7, 0)
         cv2.polylines(out, [pts], True, color, 2)
-        word = "TAKEN" if status["occupied"] else "FREE"
         x, y = pts.min(axis=0)
-        cv2.putText(out, f"{status['name']}: {word}", (int(x), int(y) - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(out, f"{status['name']}: {status['status'].upper()}", (int(x), int(y) - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
     return out
 
 
@@ -127,7 +149,7 @@ def process(path, cfg, detector):
     status = {
         "image": str(path),
         "analyzed_at": datetime.now().isoformat(timespec="seconds"),
-        "any_free": any(not s["occupied"] for s in spots),
+        "any_free": any(s["status"] == "free" for s in spots),
         "spots": spots,
     }
 
@@ -141,7 +163,7 @@ def process(path, cfg, detector):
         f.write(json.dumps(status) + "\n")
 
     summary = ", ".join(
-        f"{s['name']}={'TAKEN' if s['occupied'] else 'FREE'}({s['overlap']:.0%})"
+        f"{s['name']}={s['status'].upper()}({s['overlap']:.0%})"
         for s in spots
     )
     log.info("%s: %s", Path(path).name, summary)
@@ -191,6 +213,8 @@ def grid(image_path, cfg, out_path):
         cv2.polylines(img, [pts], True, (0, 255, 255), 2)
         cv2.putText(img, spot["name"], tuple(int(v) for v in pts[0]),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    for zone in cfg.get("ignore", []):
+        cv2.polylines(img, [np.array(zone, np.int32)], True, (255, 0, 255), 2)
     cv2.imwrite(str(out_path), img)
     print(f"{w}x{h} image, grid written to {out_path}")
 

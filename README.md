@@ -26,7 +26,7 @@ YOLOv8 finds the vehicles in each photo. A spot counts as taken when the bottom 
 
 Results go to `output_dir`:
 - `latest.json`: current status, including `any_free`
-- `latest.jpg`: the photo with spots marked FREE or TAKEN
+- `latest.jpg`: the photo with spots marked FREE, TAKEN or HIDDEN (blocked from view, e.g. by a double-parked truck)
 - `history.jsonl`: one line per analyzed image
 
 To run it as a service, edit the paths and user in `parkour.service` if needed, then:

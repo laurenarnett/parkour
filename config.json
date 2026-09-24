@@ -1,14 +1,16 @@
 {
   "uploads_dir": "/home/cameraftp/uploads",
-  "output_dir": "/home/cameraftp/parkour",
-  "model": "yolov8n.pt",
-  "confidence": 0.3,
-  "occupied_threshold": 0.3,
+  "model": "yolov8s.pt",
+  "confidence": 0.25,
+  "occupied_threshold": 0.2,
   "poll_seconds": 2,
   "spots": [
-    {
-      "name": "curb",
-      "polygon": [[100, 600], [700, 550], [760, 700], [80, 780]]
-    }
+    {"name": "near-1", "polygon": [[338, 248], [402, 222], [528, 318], [468, 352]]},
+    {"name": "near-2", "polygon": [[270, 192], [322, 172], [402, 222], [338, 248]]},
+    {"name": "far-1", "polygon": [[668, 212], [836, 268], [832, 302], [668, 255]]},
+    {"name": "far-2", "polygon": [[445, 140], [542, 156], [542, 184], [445, 168]]}
+  ],
+  "ignore": [
+    [[498, 320], [632, 320], [632, 462], [498, 462]]
   ]
 }
