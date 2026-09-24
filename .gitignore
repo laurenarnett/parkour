@@ -3,3 +3,4 @@ __pycache__/
 *.pt
 grid.jpg
 output/
+notify.env

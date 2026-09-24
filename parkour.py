@@ -6,7 +6,9 @@ The camera uploads JPEGs over FTP into dated folders, e.g.
 
 Usage:
     parkour.py check IMAGE        analyze one image and print spot status
-    parkour.py watch              analyze new uploads as they arrive
+    parkour.py watch              analyze new uploads as they arrive, and
+                                  notify NTFY_TOPIC when a spot frees up
+    parkour.py test-notify        send a test notification
     parkour.py grid IMAGE         draw a coordinate grid + configured spots,
                                   for figuring out spot polygon coordinates
 """
@@ -17,6 +19,7 @@ import logging
 import os
 import sys
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -43,6 +46,8 @@ def load_config(path):
     cfg.setdefault("poll_seconds", 2)
     cfg.setdefault("ignore", [])
     cfg.setdefault("frame_size", [896, 512])
+    cfg.setdefault("ntfy_server", "https://ntfy.sh")
+    cfg.setdefault("notify_confirm", 1)
     if not cfg.get("spots"):
         sys.exit(f"{path}: define at least one entry in \"spots\"")
     return cfg
@@ -180,6 +185,60 @@ def process(path, cfg, detector):
     return status
 
 
+class Notifier:
+    """Send a phone notification via ntfy when a spot goes from taken to free.
+
+    The topic comes from the NTFY_TOPIC environment variable rather than
+    config.json: anyone who knows an ntfy.sh topic can read it, and the
+    notifications include photos of the street.
+    """
+
+    def __init__(self, cfg):
+        self.topic = os.environ.get("NTFY_TOPIC")
+        self.server = cfg["ntfy_server"].rstrip("/")
+        self.confirm = cfg["notify_confirm"]
+        self.state = {}        # spot name -> last confirmed "taken" / "free"
+        self.free_streak = {}  # spot name -> consecutive free readings
+        if not self.topic:
+            log.warning("NTFY_TOPIC not set; notifications disabled")
+
+    def update(self, status, image_path):
+        opened = []
+        for spot in status["spots"]:
+            name = spot["name"]
+            if spot["status"] == "hidden":
+                continue  # can't see it, so keep what we knew before
+            if spot["status"] == "taken":
+                self.state[name] = "taken"
+                self.free_streak[name] = 0
+                continue
+            self.free_streak[name] = self.free_streak.get(name, 0) + 1
+            if self.free_streak[name] >= self.confirm:
+                # Only a taken -> free change alerts, so restarting the
+                # watcher doesn't announce spots that were already free.
+                if self.state.get(name) == "taken":
+                    opened.append(name)
+                self.state[name] = "free"
+        if opened:
+            self.send(f"{', '.join(opened)} {'is' if len(opened) == 1 else 'are'} free", image_path)
+        return opened
+
+    def send(self, message, image_path=None):
+        if not self.topic:
+            return
+        data = Path(image_path).read_bytes() if image_path else message.encode()
+        headers = {"Title": "Parking spot open", "Tags": "car"}
+        if image_path:
+            headers.update({"Message": message, "Filename": "parking.jpg"})
+        req = urllib.request.Request(f"{self.server}/{self.topic}", data=data,
+                                     headers=headers, method="PUT")
+        try:
+            urllib.request.urlopen(req, timeout=20).close()
+            log.info("notified: %s", message)
+        except Exception:
+            log.exception("failed to send notification")
+
+
 def list_images(root):
     return sorted(p for p in Path(root).rglob("*") if p.suffix.lower() in (".jpg", ".jpeg"))
 
@@ -188,6 +247,7 @@ def watch(cfg, detector, backfill):
     root = cfg["uploads_dir"]
     seen = set() if backfill else set(list_images(root))
     log.info("watching %s (%d existing images skipped)", root, len(seen))
+    notifier = Notifier(cfg)
     while True:
         for path in list_images(root):
             if path in seen:
@@ -200,7 +260,9 @@ def watch(cfg, detector, backfill):
                 continue
             seen.add(path)
             try:
-                process(path, cfg, detector)
+                status = process(path, cfg, detector)
+                if status:
+                    notifier.update(status, Path(cfg["output_dir"]) / "latest.jpg")
             except Exception:
                 log.exception("failed to process %s", path)
         time.sleep(cfg["poll_seconds"])
@@ -237,6 +299,7 @@ def main():
     p.add_argument("image")
     p = sub.add_parser("watch")
     p.add_argument("--backfill", action="store_true", help="also analyze images already on disk")
+    sub.add_parser("test-notify", help="send a test notification to NTFY_TOPIC")
     p = sub.add_parser("grid")
     p.add_argument("image")
     p.add_argument("-o", "--out", default="grid.jpg")
@@ -244,6 +307,13 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     cfg = load_config(args.config)
+
+    if args.cmd == "test-notify":
+        notifier = Notifier(cfg)
+        if not notifier.topic:
+            sys.exit("set NTFY_TOPIC first")
+        notifier.send("Test from parkour: notifications are working")
+        return
 
     if args.cmd == "grid":
         grid(args.image, cfg, args.out)

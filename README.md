@@ -30,6 +30,19 @@ Results go to `output_dir`:
 - `latest.jpg`: the photo with spots marked FREE, TAKEN or HIDDEN (blocked from view, e.g. by a double-parked truck)
 - `history.jsonl`: one line per analyzed image
 
+## Phone notifications
+
+The watcher sends an [ntfy](https://ntfy.sh) notification, with the annotated photo attached, when a spot goes from taken to free.
+
+1. Install the ntfy app on your phone and subscribe to a hard-to-guess topic name. Anyone who knows the name can read the photos.
+2. On the Pi, put the topic in `notify.env`. This file is git-ignored, so the name stays out of this public repo:
+
+       echo NTFY_TOPIC=your-topic-name > notify.env
+
+3. Send a test: `set -a; . ./notify.env; .venv/bin/python parkour.py test-notify`
+
+To wait for N free readings in a row before alerting, set `notify_confirm` in `config.json`.
+
 To run it as a service, edit the paths and user in `parkour.service` if needed, then:
 
     sudo cp parkour.service /etc/systemd/system/ && sudo systemctl enable --now parkour

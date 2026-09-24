@@ -5,6 +5,7 @@ After=network.target
 [Service]
 User=larnett
 WorkingDirectory=/home/larnett/parkour
+EnvironmentFile=-/home/larnett/parkour/notify.env
 ExecStart=/home/larnett/venv/bin/python parkour.py watch
 Restart=on-failure
 
