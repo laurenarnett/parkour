@@ -43,6 +43,10 @@ The watcher sends an [ntfy](https://ntfy.sh) notification, with the annotated ph
 
 To wait for N free readings in a row before alerting, set `notify_confirm` in `config.json`.
 
+### Street cleaning
+
+Each spot has a `side`, and `street_cleaning` lists each side's cleaning windows (e.g. `"Tue 11:00-12:30"`). Alerts say how long a spot stays legal ("good until Mon 11:00am (4 days)"). Spots you'd have to move out of within `notify_min_hours` (24 by default) don't alert, and neither do spots on a side being cleaned right now. The cleaning schedule doesn't know about holiday suspensions.
+
 To run it as a service, edit the paths and user in `parkour.service` if needed, then:
 
     sudo cp parkour.service /etc/systemd/system/ && sudo systemctl enable --now parkour

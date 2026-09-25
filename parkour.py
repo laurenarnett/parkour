@@ -20,7 +20,7 @@ import os
 import sys
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -48,9 +48,47 @@ def load_config(path):
     cfg.setdefault("frame_size", [896, 512])
     cfg.setdefault("ntfy_server", "https://ntfy.sh")
     cfg.setdefault("notify_confirm", 1)
+    cfg.setdefault("notify_min_hours", 24)
+    cfg["street_cleaning"] = {side: [parse_window(w) for w in windows]
+                              for side, windows in cfg.get("street_cleaning", {}).items()}
     if not cfg.get("spots"):
         sys.exit(f"{path}: define at least one entry in \"spots\"")
+    for spot in cfg["spots"]:
+        side = spot.get("side")
+        if side is not None and side not in cfg["street_cleaning"]:
+            sys.exit(f"{path}: spot {spot['name']} has side {side!r} with no street_cleaning entry")
     return cfg
+
+
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def parse_window(text):
+    """Parse a street cleaning window like "Tue 11:00-12:30" into (weekday, start, end)."""
+    day, times = text.split()
+    start, end = (datetime.strptime(t, "%H:%M").time() for t in times.split("-"))
+    return DAYS.index(day[:3].lower()), start, end
+
+
+def legal_until(windows, now):
+    """When a car parked now must move for street cleaning (now if cleaning is underway).
+
+    Returns None when the side has no cleaning windows.
+    """
+    for offset in range(8):
+        day = now.date() + timedelta(days=offset)
+        starts = []
+        for weekday, start, end in windows:
+            if day.weekday() != weekday:
+                continue
+            start_at, end_at = datetime.combine(day, start), datetime.combine(day, end)
+            if start_at <= now < end_at:
+                return now
+            if start_at > now:
+                starts.append(start_at)
+        if starts:
+            return min(starts)
+    return None
 
 
 class Detector:
@@ -197,12 +235,15 @@ class Notifier:
         self.topic = os.environ.get("NTFY_TOPIC")
         self.server = cfg["ntfy_server"].rstrip("/")
         self.confirm = cfg["notify_confirm"]
+        self.min_hours = cfg["notify_min_hours"]
+        self.cleaning = cfg["street_cleaning"]
+        self.sides = {spot["name"]: spot.get("side") for spot in cfg["spots"]}
         self.state = {}        # spot name -> last confirmed "taken" / "free"
         self.free_streak = {}  # spot name -> consecutive free readings
         if not self.topic:
             log.warning("NTFY_TOPIC not set; notifications disabled")
 
-    def update(self, status, image_path):
+    def update(self, status, image_path, now=None):
         opened = []
         for spot in status["spots"]:
             name = spot["name"]
@@ -219,9 +260,26 @@ class Notifier:
                 if self.state.get(name) == "taken":
                     opened.append(name)
                 self.state[name] = "free"
-        if opened:
-            self.send(f"{', '.join(opened)} {'is' if len(opened) == 1 else 'are'} free", image_path)
-        return opened
+        now = now or datetime.now()
+        worth_it = []  # (hours legal, message line)
+        for name in opened:
+            side = self.sides.get(name)
+            until = legal_until(self.cleaning[side], now) if side else None
+            if until is None:
+                worth_it.append((float("inf"), f"{name} is free"))
+                continue
+            hours = (until - now).total_seconds() / 3600
+            if hours < self.min_hours:
+                why = "street cleaning in progress" if hours == 0 else f"must move by {until:%a %H:%M}"
+                log.info("not notifying %s: free but %s", name, why)
+                continue
+            left = f"{hours / 24:.0f} days" if hours >= 48 else f"{hours:.0f}h"
+            when = until.strftime("%a %-I:%M") + until.strftime("%p").lower()
+            worth_it.append((hours, f"{name} is free - good until {when} ({left})"))
+        if worth_it:
+            worth_it.sort(reverse=True)
+            self.send("; ".join(line for _, line in worth_it), image_path)
+        return [line for _, line in worth_it]
 
     def send(self, message, image_path=None):
         if not self.topic:
