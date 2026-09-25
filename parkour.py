@@ -50,6 +50,7 @@ def load_config(path):
     cfg.setdefault("ntfy_server", "https://ntfy.sh")
     cfg.setdefault("notify_confirm", 1)
     cfg.setdefault("notify_min_hours", 24)
+    cfg.setdefault("notify_before_cleaning_ends_minutes", 15)
     cfg.setdefault("suspension_calendar_url",
                    "https://www.nyc.gov/html/dot/downloads/misc/{year}-alternate-side.ics")
     cfg["street_cleaning"] = {side: [parse_window(w) for w in windows]
@@ -99,6 +100,15 @@ def legal_until(windows, now, suspended=frozenset()):
         if starts:
             return min(starts), skipped
     return None, skipped
+
+
+def cleaning_ends(windows, now, suspended=frozenset()):
+    """End of the street cleaning window underway at `now`, or None if there isn't one."""
+    for weekday, start, end in windows:
+        if now.weekday() == weekday and now.date() not in suspended:
+            if datetime.combine(now.date(), start) <= now < datetime.combine(now.date(), end):
+                return datetime.combine(now.date(), end)
+    return None
 
 
 def parse_suspensions(ics_text):
@@ -302,6 +312,8 @@ class Notifier:
         self.server = cfg["ntfy_server"].rstrip("/")
         self.confirm = cfg["notify_confirm"]
         self.min_hours = cfg["notify_min_hours"]
+        self.end_lead = timedelta(minutes=cfg["notify_before_cleaning_ends_minutes"])
+        self.end_alerted = set()  # (spot name, cleaning window end) already announced
         self.cleaning = cfg["street_cleaning"]
         self.sides = {spot["name"]: spot.get("side") for spot in cfg["spots"]}
         self.suspensions = SuspensionCalendar(cfg["suspension_calendar_url"], cfg["output_dir"])
@@ -327,18 +339,32 @@ class Notifier:
                 if self.state.get(name) == "taken":
                     opened.append(name)
                 self.state[name] = "free"
-        if not opened:
-            return []
         now = now or datetime.now()
+        legal_from = {name: now for name in opened}
+
+        # Near the end of a cleaning window, that side's free spots were
+        # emptied for cleaning (a change we stayed quiet about), so announce
+        # them once now: they're good for days once the window ends.
+        ending = [s for s in status["spots"] if s["status"] == "free" and self.sides.get(s["name"])]
+        if ending:
+            suspended = self.suspensions.get(now)
+            for spot in ending:
+                end = cleaning_ends(self.cleaning[self.sides[spot["name"]]], now, suspended)
+                if end and end - now <= self.end_lead and (spot["name"], end) not in self.end_alerted:
+                    self.end_alerted.add((spot["name"], end))
+                    legal_from[spot["name"]] = end
+
+        if not legal_from:
+            return []
         suspended = self.suspensions.get(now)
         worth_it = []  # (hours legal, message line)
-        for name in opened:
+        for name, start in legal_from.items():
             side = self.sides.get(name)
-            until, skipped = legal_until(self.cleaning[side], now, suspended) if side else (None, [])
+            until, skipped = legal_until(self.cleaning[side], start, suspended) if side else (None, [])
             if until is None:
                 worth_it.append((float("inf"), f"{name} is free"))
                 continue
-            hours = (until - now).total_seconds() / 3600
+            hours = (until - start).total_seconds() / 3600
             if hours < self.min_hours:
                 why = "street cleaning in progress" if hours == 0 else f"must move by {until:%a %H:%M}"
                 log.info("not notifying %s: free but %s", name, why)
@@ -346,7 +372,8 @@ class Notifier:
             left = f"{hours / 24:.0f} days" if hours >= 48 else f"{hours:.0f}h"
             when = until.strftime("%a %-I:%M") + until.strftime("%p").lower()
             note = f", {', '.join(f'{d:%a %-m/%-d}' for d in skipped)} cleaning suspended" if skipped else ""
-            worth_it.append((hours, f"{name} is free - good until {when} ({left}{note})"))
+            after = f" after cleaning ends at {start.strftime('%-I:%M') + start.strftime('%p').lower()}" if start > now else ""
+            worth_it.append((hours, f"{name} is free{after} - good until {when} ({left}{note})"))
         if worth_it:
             worth_it.sort(reverse=True)
             self.send("; ".join(line for _, line in worth_it), image_path)

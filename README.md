@@ -45,7 +45,9 @@ To wait for N free readings in a row before alerting, set `notify_confirm` in `c
 
 ### Street cleaning
 
-Each spot has a `side`, and `street_cleaning` lists each side's cleaning windows (e.g. `"Tue 11:00-12:30"`). Alerts say how long a spot stays legal ("good until Mon 11:00am (4 days)"). Spots you'd have to move out of within `notify_min_hours` (24 by default) don't alert, and neither do spots on a side being cleaned right now. Holiday suspensions come from [NYC DOT's alternate side parking calendar](https://www.nyc.gov/html/dot/html/motorist/alternate-side-parking.shtml). It's downloaded once a day, and a copy is cached in `output/`. A suspended cleaning day is skipped when working out how long a spot is good for, and the alert notes it ("Mon 10/12 cleaning suspended"). Last-minute suspensions, e.g. for snow, aren't in the calendar. Set `suspension_calendar_url` to `""` to turn this off.
+Each spot has a `side`, and `street_cleaning` lists each side's cleaning windows (e.g. `"Tue 11:00-12:30"`). Alerts say how long a spot stays legal ("good until Mon 11:00am (4 days)"). Spots you'd have to move out of within `notify_min_hours` (24 by default) don't alert, and neither do spots on a side being cleaned right now. In the last `notify_before_cleaning_ends_minutes` (15 by default) of a side's cleaning window, any spot on that side that a photo shows as free alerts once, e.g. "near-1 is free after cleaning ends at 12:30pm - good until Tue 11:00am (4 days)". A spot emptied for cleaning never counts as a new opening, so without this you'd never hear about it.
+
+Holiday suspensions come from [NYC DOT's alternate side parking calendar](https://www.nyc.gov/html/dot/html/motorist/alternate-side-parking.shtml). It's downloaded once a day, and a copy is cached in `output/`. A suspended cleaning day is skipped when working out how long a spot is good for, and the alert notes it ("Mon 10/12 cleaning suspended"). Last-minute suspensions, e.g. for snow, aren't in the calendar. Set `suspension_calendar_url` to `""` to turn this off.
 
 To run it as a service, edit the paths and user in `parkour.service` if needed, then:
 
