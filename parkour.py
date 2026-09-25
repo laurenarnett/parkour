@@ -314,6 +314,7 @@ class Notifier:
         self.min_hours = cfg["notify_min_hours"]
         self.end_lead = timedelta(minutes=cfg["notify_before_cleaning_ends_minutes"])
         self.end_alerted = set()  # (spot name, cleaning window end) already announced
+        self.latest = None        # (status, annotated image path, when) of the last photo
         self.cleaning = cfg["street_cleaning"]
         self.sides = {spot["name"]: spot.get("side") for spot in cfg["spots"]}
         self.suspensions = SuspensionCalendar(cfg["suspension_calendar_url"], cfg["output_dir"])
@@ -340,29 +341,59 @@ class Notifier:
                     opened.append(name)
                 self.state[name] = "free"
         now = now or datetime.now()
+        self.latest = (status, image_path, now)
         legal_from = {name: now for name in opened}
+        legal_from.update(self._cleaning_ending(status, now, now))
+        return self._announce(legal_from, now, image_path, now)
 
-        # Near the end of a cleaning window, that side's free spots were
-        # emptied for cleaning (a change we stayed quiet about), so announce
-        # them once now: they're good for days once the window ends.
-        ending = [s for s in status["spots"] if s["status"] == "free" and self.sides.get(s["name"])]
-        if ending:
-            suspended = self.suspensions.get(now)
-            for spot in ending:
-                end = cleaning_ends(self.cleaning[self.sides[spot["name"]]], now, suspended)
-                if end and end - now <= self.end_lead and (spot["name"], end) not in self.end_alerted:
-                    self.end_alerted.add((spot["name"], end))
-                    legal_from[spot["name"]] = end
+    def tick(self, now=None):
+        """Between photos: once a cleaning window reaches its last minutes,
+        announce the spots the latest photo shows free, without waiting for
+        the camera to see motion and send another photo."""
+        if not self.latest:
+            return []
+        status, image_path, seen_at = self.latest
+        now = now or datetime.now()
+        ending = self._cleaning_ending(status, now, seen_at)
+        return self._announce(ending, now, image_path, seen_at) if ending else []
 
+    def _cleaning_ending(self, status, now, seen_at):
+        """Free spots, as of the photo taken at seen_at, on a side whose
+        cleaning window ends within end_lead of now, each announced once per
+        window: {spot name: window end}.
+
+        Those spots were emptied for cleaning (a change we stayed quiet about),
+        so they never show up as newly opened, but they're good for days once
+        the window ends.
+        """
+        free = [s["name"] for s in status["spots"] if s["status"] == "free" and self.sides.get(s["name"])]
+        if not free:
+            return {}
+        suspended = self.suspensions.get(now)
+        found = {}
+        for name in free:
+            windows = self.cleaning[self.sides[name]]
+            end = cleaning_ends(windows, now, suspended)
+            # A photo from before this window shows cars that have since left.
+            if (end and end - now <= self.end_lead and (name, end) not in self.end_alerted
+                    and cleaning_ends(windows, seen_at, suspended) == end):
+                self.end_alerted.add((name, end))
+                found[name] = end
+        return found
+
+    def _announce(self, legal_from, now, image_path, seen_at):
+        """Notify about spots free now, legal from legal_from[name]."""
         if not legal_from:
             return []
         suspended = self.suspensions.get(now)
+        seen = seen_at.strftime("%-I:%M") + seen_at.strftime("%p").lower()
         worth_it = []  # (hours legal, message line)
         for name, start in legal_from.items():
             side = self.sides.get(name)
             until, skipped = legal_until(self.cleaning[side], start, suspended) if side else (None, [])
+            is_free = f"{name} is free" if now - seen_at < timedelta(minutes=1) else f"{name} was free at {seen}"
             if until is None:
-                worth_it.append((float("inf"), f"{name} is free"))
+                worth_it.append((float("inf"), is_free))
                 continue
             hours = (until - start).total_seconds() / 3600
             if hours < self.min_hours:
@@ -372,8 +403,8 @@ class Notifier:
             left = f"{hours / 24:.0f} days" if hours >= 48 else f"{hours:.0f}h"
             when = until.strftime("%a %-I:%M") + until.strftime("%p").lower()
             note = f", {', '.join(f'{d:%a %-m/%-d}' for d in skipped)} cleaning suspended" if skipped else ""
-            after = f" after cleaning ends at {start.strftime('%-I:%M') + start.strftime('%p').lower()}" if start > now else ""
-            worth_it.append((hours, f"{name} is free{after} - good until {when} ({left}{note})"))
+            after = f", legal after cleaning ends at {start.strftime('%-I:%M') + start.strftime('%p').lower()}" if start > now else ""
+            worth_it.append((hours, f"{is_free}{after} - good until {when} ({left}{note})"))
         if worth_it:
             worth_it.sort(reverse=True)
             self.send("; ".join(line for _, line in worth_it), image_path)
@@ -421,6 +452,10 @@ def watch(cfg, detector, backfill):
                     notifier.update(status, Path(cfg["output_dir"]) / "latest.jpg")
             except Exception:
                 log.exception("failed to process %s", path)
+        try:
+            notifier.tick()
+        except Exception:
+            log.exception("failed to check for the end of street cleaning")
         time.sleep(cfg["poll_seconds"])
 
 
