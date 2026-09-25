@@ -313,7 +313,14 @@ class Notifier:
         self.confirm = cfg["notify_confirm"]
         self.min_hours = cfg["notify_min_hours"]
         self.end_lead = timedelta(minutes=cfg["notify_before_cleaning_ends_minutes"])
-        self.end_alerted = set()  # (spot name, cleaning window end) already announced
+        # (spot name, cleaning window end) already announced, saved so a
+        # restart doesn't announce them again.
+        self.end_alerted_file = Path(cfg["output_dir"]) / "end_alerted.json"
+        try:
+            self.end_alerted = {(name, datetime.fromisoformat(end))
+                                for name, end in json.loads(self.end_alerted_file.read_text())}
+        except (OSError, ValueError):
+            self.end_alerted = set()
         self.latest = None        # (status, annotated image path, when) of the last photo
         self.cleaning = cfg["street_cleaning"]
         self.sides = {spot["name"]: spot.get("side") for spot in cfg["spots"]}
@@ -379,6 +386,10 @@ class Notifier:
                     and cleaning_ends(windows, seen_at, suspended) == end):
                 self.end_alerted.add((name, end))
                 found[name] = end
+        if found:
+            self.end_alerted = {(n, e) for n, e in self.end_alerted if e > now - timedelta(days=1)}
+            self.end_alerted_file.parent.mkdir(parents=True, exist_ok=True)
+            self.end_alerted_file.write_text(json.dumps(sorted((n, e.isoformat()) for n, e in self.end_alerted)))
         return found
 
     def _announce(self, legal_from, now, image_path, seen_at):
