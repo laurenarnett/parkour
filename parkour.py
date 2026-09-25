@@ -102,6 +102,11 @@ def legal_until(windows, now, suspended=frozenset()):
     return None, skipped
 
 
+def short_time(t):
+    """12:30, 11am: short clock times for notifications."""
+    return t.strftime("%-I:%M") if t.minute else t.strftime("%-I%p").lower()
+
+
 def cleaning_ends(windows, now, suspended=frozenset()):
     """End of the street cleaning window underway at `now`, or None if there isn't one."""
     for weekday, start, end in windows:
@@ -393,33 +398,37 @@ class Notifier:
         return found
 
     def _announce(self, legal_from, now, image_path, seen_at):
-        """Notify about spots free now, legal from legal_from[name]."""
+        """Notify about spots free now, legal from legal_from[name].
+
+        Messages are short, with spots that share details grouped:
+        "near-1, near-2 free after 12:30 - till Tue (no cleaning Mon)".
+        """
         if not legal_from:
             return []
         suspended = self.suspensions.get(now)
-        seen = seen_at.strftime("%-I:%M") + seen_at.strftime("%p").lower()
-        worth_it = []  # (hours legal, message line)
-        for name, start in legal_from.items():
+        groups = {}  # details -> (hours legal, spot names)
+        for name, start in sorted(legal_from.items()):
             side = self.sides.get(name)
             until, skipped = legal_until(self.cleaning[side], start, suspended) if side else (None, [])
-            is_free = f"{name} is free" if now - seen_at < timedelta(minutes=1) else f"{name} was free at {seen}"
             if until is None:
-                worth_it.append((float("inf"), is_free))
-                continue
-            hours = (until - start).total_seconds() / 3600
-            if hours < self.min_hours:
-                why = "street cleaning in progress" if hours == 0 else f"must move by {until:%a %H:%M}"
-                log.info("not notifying %s: free but %s", name, why)
-                continue
-            left = f"{hours / 24:.0f} days" if hours >= 48 else f"{hours:.0f}h"
-            when = until.strftime("%a %-I:%M") + until.strftime("%p").lower()
-            note = f", {', '.join(f'{d:%a %-m/%-d}' for d in skipped)} cleaning suspended" if skipped else ""
-            after = f", legal after cleaning ends at {start.strftime('%-I:%M') + start.strftime('%p').lower()}" if start > now else ""
-            worth_it.append((hours, f"{is_free}{after} - good until {when} ({left}{note})"))
-        if worth_it:
-            worth_it.sort(reverse=True)
-            self.send("; ".join(line for _, line in worth_it), image_path)
-        return [line for _, line in worth_it]
+                hours, details = float("inf"), ""
+            else:
+                hours = (until - start).total_seconds() / 3600
+                if hours < self.min_hours:
+                    why = "street cleaning in progress" if hours == 0 else f"must move by {until:%a %H:%M}"
+                    log.info("not notifying %s: free but %s", name, why)
+                    continue
+                details = f" - till {short_time(until) if hours < 24 else until.strftime('%a' if hours < 144 else '%a %-m/%-d')}"
+                if skipped:
+                    details += f" (no cleaning {', '.join(d.strftime('%a') for d in skipped)})"
+            if start > now:
+                details = f" after {short_time(start)}" + details
+            groups.setdefault(details, (hours, []))[1].append(name)
+        lines = [f"{', '.join(names)} free{details}"
+                 for details, (hours, names) in sorted(groups.items(), key=lambda g: -g[1][0])]
+        if lines:
+            self.send("; ".join(lines), image_path)
+        return lines
 
     def send(self, message, image_path=None):
         if not self.topic:
