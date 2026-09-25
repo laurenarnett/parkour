@@ -435,6 +435,12 @@ def watch(cfg, detector, backfill):
     seen = set() if backfill else set(list_images(root))
     log.info("watching %s (%d existing images skipped)", root, len(seen))
     notifier = Notifier(cfg)
+    # Pick up the last photo's results so a restart during a cleaning window
+    # can still announce spots from it.
+    latest = Path(cfg["output_dir"]) / "latest.json"
+    if latest.exists():
+        status = json.loads(latest.read_text())
+        notifier.latest = (status, latest.with_suffix(".jpg"), datetime.fromisoformat(status["analyzed_at"]))
     while True:
         for path in list_images(root):
             if path in seen:
