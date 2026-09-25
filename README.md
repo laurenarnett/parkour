@@ -45,7 +45,7 @@ To wait for N free readings in a row before alerting, set `notify_confirm` in `c
 
 ### Street cleaning
 
-Each spot has a `side`, and `street_cleaning` lists each side's cleaning windows (e.g. `"Tue 11:00-12:30"`). Alerts say how long a spot stays legal ("good until Mon 11:00am (4 days)"). Spots you'd have to move out of within `notify_min_hours` (24 by default) don't alert, and neither do spots on a side being cleaned right now. The cleaning schedule doesn't know about holiday suspensions.
+Each spot has a `side`, and `street_cleaning` lists each side's cleaning windows (e.g. `"Tue 11:00-12:30"`). Alerts say how long a spot stays legal ("good until Mon 11:00am (4 days)"). Spots you'd have to move out of within `notify_min_hours` (24 by default) don't alert, and neither do spots on a side being cleaned right now. Holiday suspensions come from [NYC DOT's alternate side parking calendar](https://www.nyc.gov/html/dot/html/motorist/alternate-side-parking.shtml). It's downloaded once a day, and a copy is cached in `output/`. A suspended cleaning day is skipped when working out how long a spot is good for, and the alert notes it ("Mon 10/12 cleaning suspended"). Last-minute suspensions, e.g. for snow, aren't in the calendar. Set `suspension_calendar_url` to `""` to turn this off.
 
 To run it as a service, edit the paths and user in `parkour.service` if needed, then:
 

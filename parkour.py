@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -49,6 +50,8 @@ def load_config(path):
     cfg.setdefault("ntfy_server", "https://ntfy.sh")
     cfg.setdefault("notify_confirm", 1)
     cfg.setdefault("notify_min_hours", 24)
+    cfg.setdefault("suspension_calendar_url",
+                   "https://www.nyc.gov/html/dot/downloads/misc/{year}-alternate-side.ics")
     cfg["street_cleaning"] = {side: [parse_window(w) for w in windows]
                               for side, windows in cfg.get("street_cleaning", {}).items()}
     if not cfg.get("spots"):
@@ -70,25 +73,88 @@ def parse_window(text):
     return DAYS.index(day[:3].lower()), start, end
 
 
-def legal_until(windows, now):
+def legal_until(windows, now, suspended=frozenset()):
     """When a car parked now must move for street cleaning (now if cleaning is underway).
 
-    Returns None when the side has no cleaning windows.
+    Returns (until, skipped): until is None when the side has no cleaning
+    windows; skipped lists cleaning days passed over because street cleaning
+    is suspended that day (e.g. for a holiday).
     """
-    for offset in range(8):
+    skipped = []
+    for offset in range(60):
         day = now.date() + timedelta(days=offset)
         starts = []
         for weekday, start, end in windows:
             if day.weekday() != weekday:
                 continue
+            if day in suspended:
+                if datetime.combine(day, end) > now:
+                    skipped.append(day)
+                continue
             start_at, end_at = datetime.combine(day, start), datetime.combine(day, end)
             if start_at <= now < end_at:
-                return now
+                return now, skipped
             if start_at > now:
                 starts.append(start_at)
         if starts:
-            return min(starts)
-    return None
+            return min(starts), skipped
+    return None, skipped
+
+
+def parse_suspensions(ics_text):
+    """Dates on which street cleaning is suspended, from NYC DOT's .ics calendar."""
+    days = set()
+    for event in ics_text.split("BEGIN:VEVENT")[1:]:
+        start = re.search(r"^DTSTART[^:]*:(\d{8})", event, re.M)
+        end = re.search(r"^DTEND[^:]*:(\d{8})(T\d{6})?", event, re.M)
+        if not start:
+            continue
+        day = datetime.strptime(start.group(1), "%Y%m%d").date()
+        last = day
+        if end:
+            last = datetime.strptime(end.group(1), "%Y%m%d").date()
+            if end.group(2) in (None, "T000000"):
+                last -= timedelta(days=1)  # DTEND is exclusive
+        while day <= last:
+            days.add(day)
+            day += timedelta(days=1)
+    return days
+
+
+class SuspensionCalendar:
+    """NYC alternate side parking suspension days, downloaded once a day.
+
+    Calendars are cached in cache_dir so a failed download (or nyc.gov being
+    down) falls back to the last copy. Next year's calendar 404s until NYC
+    publishes it, usually in the fall.
+    """
+
+    def __init__(self, url_template, cache_dir):
+        self.url_template = url_template
+        self.cache_dir = Path(cache_dir)
+        self.fetched_at = None
+        self.days = set()
+
+    def get(self, now):
+        if self.url_template and (self.fetched_at is None or now - self.fetched_at > timedelta(hours=24)):
+            self.fetched_at = now
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            for year in (now.year, now.year + 1):
+                cached = self.cache_dir / f"asp-suspensions-{year}.ics"
+                # nyc.gov rejects Python's default User-Agent with a 403.
+                req = urllib.request.Request(self.url_template.format(year=year),
+                                             headers={"User-Agent": "Mozilla/5.0 (parkour)"})
+                try:
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        cached.write_bytes(resp.read())
+                except Exception as e:
+                    if year == now.year:
+                        log.warning("couldn't download %s suspension calendar: %s", year, e)
+            self.days = set()
+            for cached in self.cache_dir.glob("asp-suspensions-*.ics"):
+                self.days |= parse_suspensions(cached.read_text(encoding="utf-8", errors="replace"))
+            log.info("loaded %d street cleaning suspension days", len(self.days))
+        return self.days
 
 
 class Detector:
@@ -238,6 +304,7 @@ class Notifier:
         self.min_hours = cfg["notify_min_hours"]
         self.cleaning = cfg["street_cleaning"]
         self.sides = {spot["name"]: spot.get("side") for spot in cfg["spots"]}
+        self.suspensions = SuspensionCalendar(cfg["suspension_calendar_url"], cfg["output_dir"])
         self.state = {}        # spot name -> last confirmed "taken" / "free"
         self.free_streak = {}  # spot name -> consecutive free readings
         if not self.topic:
@@ -260,11 +327,14 @@ class Notifier:
                 if self.state.get(name) == "taken":
                     opened.append(name)
                 self.state[name] = "free"
+        if not opened:
+            return []
         now = now or datetime.now()
+        suspended = self.suspensions.get(now)
         worth_it = []  # (hours legal, message line)
         for name in opened:
             side = self.sides.get(name)
-            until = legal_until(self.cleaning[side], now) if side else None
+            until, skipped = legal_until(self.cleaning[side], now, suspended) if side else (None, [])
             if until is None:
                 worth_it.append((float("inf"), f"{name} is free"))
                 continue
@@ -275,7 +345,8 @@ class Notifier:
                 continue
             left = f"{hours / 24:.0f} days" if hours >= 48 else f"{hours:.0f}h"
             when = until.strftime("%a %-I:%M") + until.strftime("%p").lower()
-            worth_it.append((hours, f"{name} is free - good until {when} ({left})"))
+            note = f", {', '.join(f'{d:%a %-m/%-d}' for d in skipped)} cleaning suspended" if skipped else ""
+            worth_it.append((hours, f"{name} is free - good until {when} ({left}{note})"))
         if worth_it:
             worth_it.sort(reverse=True)
             self.send("; ".join(line for _, line in worth_it), image_path)
